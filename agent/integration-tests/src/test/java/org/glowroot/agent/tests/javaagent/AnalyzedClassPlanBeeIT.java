@@ -85,7 +85,6 @@ public class AnalyzedClassPlanBeeIT {
         @Override
         protected synchronized Class<?> loadClass(String name, boolean resolve)
                 throws ClassNotFoundException {
-
             if (name.equals(Z.class.getName())) {
                 try {
                     return load(name);

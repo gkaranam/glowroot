@@ -15,7 +15,10 @@
  */
 package org.glowroot.agent.weaving;
 
+import java.io.IOException;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.URL;
 import java.security.CodeSource;
 import java.util.Arrays;
 import java.util.Collection;
@@ -33,6 +36,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.google.common.io.Resources;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.checker.nullness.qual.RequiresNonNull;
@@ -53,6 +57,7 @@ import org.glowroot.common.config.InstrumentationConfig;
 import org.glowroot.wire.api.model.AgentConfigOuterClass.AgentConfig.InstrumentationConfig.CaptureKind;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static org.glowroot.wire.api.model.AgentConfigOuterClass.AgentConfig.InstrumentationConfig.AlreadyInTransactionBehavior;
 import static org.objectweb.asm.Opcodes.ACC_BRIDGE;
 import static org.objectweb.asm.Opcodes.ASM7;
 import static org.objectweb.asm.Opcodes.INVOKESPECIAL;
@@ -64,6 +69,7 @@ class ClassAnalyzer {
     private final ThinClass thinClass;
     private final String className;
     private final boolean intf;
+    private final @Nullable ClassLoader loader;
 
     private final ImmutableAnalyzedClass.Builder analyzedClassBuilder;
     private final ImmutableList<AdviceMatcher> adviceMatchers;
@@ -71,6 +77,7 @@ class ClassAnalyzer {
     private final ImmutableList<ShimType> matchedShimTypes;
     private final MatchedMixinTypes matchedMixinTypes;
     private final boolean hasMainMethod;
+    private final boolean isClassLoader;
 
     private final ImmutableSet<String> superClassNames;
 
@@ -91,6 +98,7 @@ class ClassAnalyzer {
             @Nullable CodeSource codeSource, byte[] classBytes,
             @Nullable Class<?> classBeingRedefined, boolean noLongerNeedToWeaveMainMethods) {
         this.thinClass = thinClass;
+        this.loader = loader;
         ImmutableList<String> interfaceNames = ClassNames.fromInternalNames(thinClass.interfaces());
         className = ClassNames.fromInternalName(thinClass.name());
         intf = Modifier.isInterface(thinClass.access());
@@ -129,6 +137,7 @@ class ClassAnalyzer {
             matchedMixinTypes = getMatchedMixinTypes(mixinTypes, className, classBeingRedefined,
                     ImmutableList.<AnalyzedClass>of(), ImmutableList.<AnalyzedClass>of());
             hasMainMethod = false;
+            isClassLoader = false;
         } else {
             List<AnalyzedClass> superAnalyzedHierarchy = analyzedWorld
                     .getAnalyzedHierarchy(superClassName, loader, className, parseContext);
@@ -140,8 +149,21 @@ class ClassAnalyzer {
             if (noLongerNeedToWeaveMainMethods) {
                 hasMainMethod = false;
             } else {
-                hasMainMethod = hasMainMethod(thinClass.nonBridgeMethods())
+                hasMainMethod = hasMainOrPossibleProcrunStartMethod(thinClass.nonBridgeMethods())
                         || className.equals("org.apache.commons.daemon.support.DaemonLoader");
+            }
+            if (className.startsWith("org.glowroot.agent.tests.")) {
+                // e.g. see AnalyzedClassPlanBeeWithMoreBadPreloadCacheIT
+                isClassLoader = false;
+            } else {
+                boolean isClassLoader = false;
+                for (AnalyzedClass superAnalyzedClass : superAnalyzedHierarchy) {
+                    if (superAnalyzedClass.name().equals(ClassLoader.class.getName())) {
+                        isClassLoader = true;
+                        break;
+                    }
+                }
+                this.isClassLoader = isClassLoader;
             }
         }
         analyzedClassBuilder.addAllShimTypes(matchedShimTypes);
@@ -188,7 +210,7 @@ class ClassAnalyzer {
         this.hackAdvisors = loader != null;
     }
 
-    void analyzeMethods() {
+    void analyzeMethods() throws ClassNotFoundException, IOException {
         methodAdvisors = Maps.newHashMap();
         bridgeTargetAdvisors = Maps.newHashMap();
         for (ThinMethod bridgeMethod : thinClass.bridgeMethods()) {
@@ -232,7 +254,7 @@ class ClassAnalyzer {
         }
         return !methodAdvisors.isEmpty() || !methodsThatOnlyNowFulfillAdvice.isEmpty()
                 || !matchedShimTypes.isEmpty() || !matchedMixinTypes.reweavable().isEmpty()
-                || hasMainMethod;
+                || hasMainMethod || isClassLoader;
     }
 
     ImmutableList<ShimType> getMatchedShimTypes() {
@@ -251,16 +273,21 @@ class ClassAnalyzer {
         return analyzedClassBuilder.build();
     }
 
+    boolean isClassLoader() {
+        return isClassLoader;
+    }
+
     List<AnalyzedMethod> getMethodsThatOnlyNowFulfillAdvice() {
         return checkNotNull(methodsThatOnlyNowFulfillAdvice);
     }
 
     @RequiresNonNull("bridgeTargetAdvisors")
     private List<Advice> analyzeMethod(ThinMethod thinMethod) {
-        List<Type> parameterTypes = Arrays.asList(Type.getArgumentTypes(thinMethod.descriptor()));
         if (Modifier.isFinal(thinMethod.access()) && Modifier.isPublic(thinMethod.access())) {
             ImmutablePublicFinalMethod.Builder builder = ImmutablePublicFinalMethod.builder()
                     .name(thinMethod.name());
+            List<Type> parameterTypes =
+                    Arrays.asList(Type.getArgumentTypes(thinMethod.descriptor()));
             for (Type parameterType : parameterTypes) {
                 builder.addParameterTypes(parameterType.getClassName());
             }
@@ -269,6 +296,7 @@ class ClassAnalyzer {
         if (shortCircuitBeforeAnalyzeMethods) {
             return ImmutableList.of();
         }
+        List<Type> parameterTypes = Arrays.asList(Type.getArgumentTypes(thinMethod.descriptor()));
         Type returnType = Type.getReturnType(thinMethod.descriptor());
         List<String> methodAnnotations = thinMethod.annotations();
         List<Advice> matchingAdvisors = getMatchingAdvisors(thinMethod, methodAnnotations,
@@ -379,7 +407,8 @@ class ClassAnalyzer {
         return possibleTargetMethods;
     }
 
-    private List<AnalyzedMethod> getMethodsThatOnlyNowFulfillAdvice(AnalyzedClass analyzedClass) {
+    private List<AnalyzedMethod> getMethodsThatOnlyNowFulfillAdvice(AnalyzedClass analyzedClass)
+            throws ClassNotFoundException, IOException {
         if (analyzedClass.isAbstract()) {
             return ImmutableList.of();
         }
@@ -391,13 +420,20 @@ class ClassAnalyzer {
         for (AnalyzedMethod analyzedMethod : analyzedClass.analyzedMethods()) {
             matchingAdvisorSets.remove(AnalyzedMethodKey.wrap(analyzedMethod));
         }
+        if (matchingAdvisorSets.isEmpty()) {
+            return ImmutableList.of();
+        }
         removeAdviceAlreadyWovenIntoSuperClass(matchingAdvisorSets);
+        if (matchingAdvisorSets.isEmpty()) {
+            return ImmutableList.of();
+        }
         removeMethodsThatWouldOverridePublicFinalMethodsFromSuperClass(matchingAdvisorSets);
+        removeMethodsThatAreNotImplementedInSuperClass(matchingAdvisorSets);
         List<AnalyzedMethod> methodsThatOnlyNowFulfillAdvice = Lists.newArrayList();
         for (Map.Entry<AnalyzedMethodKey, Set<Advice>> entry : matchingAdvisorSets.entrySet()) {
-            AnalyzedMethod inheritedMethod = checkNotNull(entry.getKey().analyzedMethod());
             Set<Advice> advisors = entry.getValue();
             if (!advisors.isEmpty()) {
+                AnalyzedMethod inheritedMethod = checkNotNull(entry.getKey().analyzedMethod());
                 methodsThatOnlyNowFulfillAdvice.add(ImmutableAnalyzedMethod.builder()
                         .copyFrom(inheritedMethod)
                         .advisors(advisors)
@@ -415,13 +451,15 @@ class ClassAnalyzer {
                 Set<Advice> matchingAdvisorSet = matchingAdvisorSets.get(key);
                 if (matchingAdvisorSet == null) {
                     matchingAdvisorSet = Sets.newHashSet();
-                    matchingAdvisorSets.put(key, matchingAdvisorSet);
                 }
                 matchingAdvisorSet.addAll(superAnalyzedMethod.advisors());
                 for (Advice advice : superAnalyzedMethod.subTypeRestrictedAdvisors()) {
                     if (isSubTypeRestrictionMatch(advice, superClassNames)) {
                         matchingAdvisorSet.add(advice);
                     }
+                }
+                if (!matchingAdvisorSet.isEmpty()) {
+                    matchingAdvisorSets.put(key, matchingAdvisorSet);
                 }
             }
         }
@@ -435,12 +473,15 @@ class ClassAnalyzer {
                 if (Modifier.isAbstract(superAnalyzedMethod.modifiers())) {
                     continue;
                 }
-                Set<Advice> matchingAdvisorSet =
-                        matchingAdvisorSets.get(AnalyzedMethodKey.wrap(superAnalyzedMethod));
+                AnalyzedMethodKey key = AnalyzedMethodKey.wrap(superAnalyzedMethod);
+                Set<Advice> matchingAdvisorSet = matchingAdvisorSets.get(key);
                 if (matchingAdvisorSet == null) {
                     continue;
                 }
                 matchingAdvisorSet.removeAll(superAnalyzedMethod.advisors());
+                if (matchingAdvisorSet.isEmpty()) {
+                    matchingAdvisorSets.remove(key);
+                }
             }
         }
     }
@@ -458,6 +499,23 @@ class ClassAnalyzer {
                 if (value != null && !value.isEmpty()) {
                     logOverridePublicFinalMethodInfo(superAnalyzedClass, publicFinalMethod);
                 }
+            }
+        }
+    }
+
+    private void removeMethodsThatAreNotImplementedInSuperClass(
+            Map<AnalyzedMethodKey, Set<Advice>> matchingAdvisorSets)
+            throws ClassNotFoundException, IOException {
+        Set<AnalyzedMethodKey> superAnalyzedMethodKeys = Sets.newHashSet();
+        for (AnalyzedClass superAnalyzedClass : superAnalyzedClasses) {
+            superAnalyzedMethodKeys
+                    .addAll(getNonAbstractMethods(superAnalyzedClass.name(), loader));
+        }
+        Iterator<AnalyzedMethodKey> i = matchingAdvisorSets.keySet().iterator();
+        while (i.hasNext()) {
+            AnalyzedMethodKey analyzedMethodKey = i.next();
+            if (!superAnalyzedMethodKeys.contains(analyzedMethodKey)) {
+                i.remove();
             }
         }
     }
@@ -551,9 +609,11 @@ class ClassAnalyzer {
                 .build();
     }
 
-    private static boolean hasMainMethod(List<ThinMethod> methods) {
+    private static boolean hasMainOrPossibleProcrunStartMethod(List<ThinMethod> methods) {
         for (ThinMethod method : methods) {
-            if (method.name().equals("main")
+            // checking for start* methods since those seem to be common for procrun users
+            if (Modifier.isPublic(method.access()) && Modifier.isStatic(method.access())
+                    && (method.name().equals("main") || method.name().startsWith("start"))
                     && method.descriptor().equals("([Ljava/lang/String;)V")) {
                 return true;
             }
@@ -605,11 +665,12 @@ class ClassAnalyzer {
                     .methodName("*")
                     .addMethodParameterTypes("..")
                     .captureKind(CaptureKind.TRANSACTION)
-                    .transactionType("Background")
+                    .transactionType("Web")
                     .transactionNameTemplate("EJB remote: " + shortClassName + "#{{methodName}}")
                     .traceEntryMessageTemplate(
                             "EJB remote: " + entry.getValue() + ".{{methodName}}()")
                     .timerName("ejb remote")
+                    .alreadyInTransactionBehavior(AlreadyInTransactionBehavior.CAPTURE_TRACE_ENTRY)
                     .build());
         }
         ImmutableMap<Advice, LazyDefinedClass> newAdvisors =
@@ -691,6 +752,43 @@ class ClassAnalyzer {
             default:
                 return Advice.ordering.sortedCopy(matchingAdvisors);
         }
+    }
+
+    private static List<AnalyzedMethodKey> getNonAbstractMethods(String className,
+            @Nullable ClassLoader loader) throws ClassNotFoundException, IOException {
+        String path = ClassNames.toInternalName(className) + ".class";
+        URL url;
+        if (loader == null) {
+            // null loader means the bootstrap class loader
+            url = ClassLoader.getSystemResource(path);
+        } else {
+            url = loader.getResource(path);
+        }
+        if (url == null) {
+            // what follows is just a best attempt in the sort-of-rare case when a custom class
+            // loader does not expose .class file contents via getResource(), e.g.
+            // org.codehaus.groovy.runtime.callsite.CallSiteClassLoader
+            return getNonAbstractMethodsPlanB(className, loader);
+        }
+        byte[] bytes = Resources.toByteArray(url);
+        NonAbstractMethodClassVisitor accv = new NonAbstractMethodClassVisitor();
+        new ClassReader(bytes).accept(accv, ClassReader.SKIP_FRAMES + ClassReader.SKIP_CODE);
+        return accv.analyzedMethodKeys;
+    }
+
+    private static List<AnalyzedMethodKey> getNonAbstractMethodsPlanB(String className,
+            @Nullable ClassLoader loader) throws ClassNotFoundException {
+        Class<?> clazz = Class.forName(className, false, loader);
+        List<AnalyzedMethodKey> analyzedMethodKeys = Lists.newArrayList();
+        for (Method method : clazz.getDeclaredMethods()) {
+            ImmutableAnalyzedMethodKey.Builder builder = ImmutableAnalyzedMethodKey.builder()
+                    .name(method.getName());
+            for (Class<?> parameterType : method.getParameterTypes()) {
+                builder.addParameterTypes(parameterType.getName());
+            }
+            analyzedMethodKeys.add(builder.build());
+        }
+        return analyzedMethodKeys;
     }
 
     // AnalyzedMethod equivalence defined only in terms of method name and parameter types
@@ -783,6 +881,29 @@ class ClassAnalyzer {
                         name + descriptor);
                 found = true;
             }
+        }
+    }
+
+    private static class NonAbstractMethodClassVisitor extends ClassVisitor {
+
+        private List<AnalyzedMethodKey> analyzedMethodKeys = Lists.newArrayList();
+
+        private NonAbstractMethodClassVisitor() {
+            super(ASM7);
+        }
+
+        @Override
+        public @Nullable MethodVisitor visitMethod(int access, String name, String descriptor,
+                @Nullable String signature, String /*@Nullable*/ [] exceptions) {
+            if (!Modifier.isAbstract(access)) {
+                ImmutableAnalyzedMethodKey.Builder builder = ImmutableAnalyzedMethodKey.builder()
+                        .name(name);
+                for (Type type : Type.getArgumentTypes(descriptor)) {
+                    builder.addParameterTypes(type.getClassName());
+                }
+                analyzedMethodKeys.add(builder.build());
+            }
+            return null;
         }
     }
 }

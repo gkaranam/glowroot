@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2018 the original author or authors.
+ * Copyright 2016-2019 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -212,6 +212,14 @@ public class ExecutorIT {
     public void shouldCaptureNestedExecute() throws Exception {
         // when
         Trace trace = container.execute(DoNestedExecuteRunnable.class);
+        // then
+        checkTrace(trace, false, false);
+    }
+
+    @Test
+    public void shouldCaptureNestedSubmit() throws Exception {
+        // when
+        Trace trace = container.execute(DoNestedSubmitCallable.class);
         // then
         checkTrace(trace, false, false);
     }
@@ -707,6 +715,53 @@ public class ExecutorIT {
                     } catch (InterruptedException e) {
                         throw new RuntimeException(e);
                     }
+                }
+            });
+        }
+    }
+
+    public static class DoNestedSubmitCallable implements AppUnderTest, TransactionMarker {
+
+        @Override
+        public void executeApp() throws Exception {
+            transactionMarker();
+        }
+
+        @Override
+        public void transactionMarker() throws Exception {
+            MoreExecutors.newDirectExecutorService().submit(new Callable<Void>() {
+                @Override
+                public Void call() throws InterruptedException {
+                    ExecutorService executor = createExecutorService();
+                    final CountDownLatch latch = new CountDownLatch(3);
+                    executor.submit(new Callable<Void>() {
+                        @Override
+                        public Void call() {
+                            new CreateTraceEntry().traceEntryMarker();
+                            latch.countDown();
+                            return null;
+                        }
+                    });
+                    executor.submit(new Callable<Void>() {
+                        @Override
+                        public Void call() {
+                            new CreateTraceEntry().traceEntryMarker();
+                            latch.countDown();
+                            return null;
+                        }
+                    });
+                    executor.submit(new Callable<Void>() {
+                        @Override
+                        public Void call() {
+                            new CreateTraceEntry().traceEntryMarker();
+                            latch.countDown();
+                            return null;
+                        }
+                    });
+                    latch.await();
+                    executor.shutdown();
+                    executor.awaitTermination(10, SECONDS);
+                    return null;
                 }
             });
         }

@@ -322,11 +322,12 @@ public class PreInitializeWeavingClasses {
         types.add("org.glowroot.agent.weaving.BootstrapMetaHolders$ClassMetaHolder");
         types.add("org.glowroot.agent.weaving.BootstrapMetaHolders$MethodMetaHolder");
         types.add("org.glowroot.agent.weaving.ClassAnalyzer");
-        types.add("org.glowroot.agent.weaving.ClassAnalyzer$MatchedMixinTypes");
         types.add("org.glowroot.agent.weaving.ClassAnalyzer$AnalyzedMethodKey");
         types.add("org.glowroot.agent.weaving.ClassAnalyzer$BridgeMethodClassVisitor");
         types.add("org.glowroot.agent.weaving.ClassAnalyzer$BridgeMethodClassVisitor"
                 + "$BridgeMethodVisitor");
+        types.add("org.glowroot.agent.weaving.ClassAnalyzer$MatchedMixinTypes");
+        types.add("org.glowroot.agent.weaving.ClassAnalyzer$NonAbstractMethodClassVisitor");
         types.add("org.glowroot.agent.weaving.ClassInfoImpl");
         types.add("org.glowroot.agent.weaving.ClassLoaders");
         types.add("org.glowroot.agent.weaving.ClassLoaders$LazyDefinedClass");
@@ -334,22 +335,12 @@ public class PreInitializeWeavingClasses {
         types.add("org.glowroot.agent.weaving.FrameDeduppingMethodVisitor");
         types.add("org.glowroot.agent.weaving.MethodInfoImpl");
         types.add("org.glowroot.agent.weaving.Weaver$ActiveWeaving");
-        types.add("org.glowroot.agent.weaving.Weaver$BitronixProxyHackClassVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$BitronixProxyHackMethodVisitor");
         types.add("org.glowroot.agent.weaving.Weaver$ClassLoaderHackClassVisitor");
         types.add("org.glowroot.agent.weaving.Weaver$ClassLoaderHackMethodVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$HikariCpProxyHackClassVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$HikariCpProxyHackMethodVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$JBossModulesHackClassVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$JBossModulesHackMethodVisitor");
         types.add("org.glowroot.agent.weaving.Weaver$JBossUrlHackClassVisitor");
         types.add("org.glowroot.agent.weaving.Weaver$JBossUrlHackMethodVisitor");
         types.add("org.glowroot.agent.weaving.Weaver$JBossWeldHackClassVisitor");
         types.add("org.glowroot.agent.weaving.Weaver$JBossWeldHackMethodVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$OpenEJBHackClassVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$OpenEJBHackMethodVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$OsgiHackClassVisitor");
-        types.add("org.glowroot.agent.weaving.Weaver$OsgiHackMethodVisitor");
         types.add("org.glowroot.agent.weaving.ImmutableAdvice");
         types.add("org.glowroot.agent.weaving.ImmutableAdvice$Builder");
         types.add("org.glowroot.agent.weaving.ImmutableAdvice$InitShim");
@@ -458,6 +449,7 @@ public class PreInitializeWeavingClasses {
         types.add("org.objectweb.asm.ClassVisitor");
         types.add("org.objectweb.asm.ClassWriter");
         types.add("org.objectweb.asm.ConstantDynamic");
+        types.add("org.objectweb.asm.Constants");
         types.add("org.objectweb.asm.Context");
         types.add("org.objectweb.asm.CurrentFrame");
         types.add("org.objectweb.asm.Edge");
@@ -473,6 +465,8 @@ public class PreInitializeWeavingClasses {
         types.add("org.objectweb.asm.ModuleVisitor");
         types.add("org.objectweb.asm.ModuleWriter");
         types.add("org.objectweb.asm.Opcodes");
+        types.add("org.objectweb.asm.RecordComponentWriter");
+        types.add("org.objectweb.asm.RecordComponentVisitor");
         types.add("org.objectweb.asm.Symbol");
         types.add("org.objectweb.asm.SymbolTable");
         types.add("org.objectweb.asm.SymbolTable$Entry");
@@ -484,6 +478,7 @@ public class PreInitializeWeavingClasses {
         types.add("org.objectweb.asm.commons.ClassRemapper");
         types.add("org.objectweb.asm.commons.FieldRemapper");
         types.add("org.objectweb.asm.commons.GeneratorAdapter");
+        types.add("org.objectweb.asm.commons.InstructionAdapter");
         types.add("org.objectweb.asm.commons.JSRInlinerAdapter");
         types.add("org.objectweb.asm.commons.JSRInlinerAdapter$Instantiation");
         types.add("org.objectweb.asm.commons.LocalVariablesSorter");
@@ -491,6 +486,7 @@ public class PreInitializeWeavingClasses {
         types.add("org.objectweb.asm.commons.MethodRemapper");
         types.add("org.objectweb.asm.commons.ModuleRemapper");
         types.add("org.objectweb.asm.commons.ModuleHashesAttribute");
+        types.add("org.objectweb.asm.commons.RecordComponentRemapper");
         types.add("org.objectweb.asm.commons.Remapper");
         types.add("org.objectweb.asm.commons.SignatureRemapper");
         types.add("org.objectweb.asm.commons.SimpleRemapper");
@@ -506,6 +502,7 @@ public class PreInitializeWeavingClasses {
         types.add("org.objectweb.asm.tree.IincInsnNode");
         types.add("org.objectweb.asm.tree.InnerClassNode");
         types.add("org.objectweb.asm.tree.InsnList");
+        types.add("org.objectweb.asm.tree.InsnList$InsnListIterator");
         types.add("org.objectweb.asm.tree.InsnNode");
         types.add("org.objectweb.asm.tree.IntInsnNode");
         types.add("org.objectweb.asm.tree.InvokeDynamicInsnNode");
@@ -526,6 +523,7 @@ public class PreInitializeWeavingClasses {
         types.add("org.objectweb.asm.tree.ModuleRequireNode");
         types.add("org.objectweb.asm.tree.MultiANewArrayInsnNode");
         types.add("org.objectweb.asm.tree.ParameterNode");
+        types.add("org.objectweb.asm.tree.RecordComponentNode");
         types.add("org.objectweb.asm.tree.TableSwitchInsnNode");
         types.add("org.objectweb.asm.tree.TryCatchBlockNode");
         types.add("org.objectweb.asm.tree.TypeAnnotationNode");

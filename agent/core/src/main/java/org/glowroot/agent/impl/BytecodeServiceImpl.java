@@ -15,8 +15,10 @@
  */
 package org.glowroot.agent.impl;
 
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.google.common.collect.Sets;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
@@ -50,6 +52,9 @@ public class BytecodeServiceImpl implements BytecodeService {
 
     private final PreloadSomeSuperTypesCache preloadSomeSuperTypesCache;
 
+    private final ThreadLocal</*@Nullable*/ Set<String>> currentlyLoadingTypesHolder =
+            new ThreadLocal</*@Nullable*/ Set<String>>();
+
     public BytecodeServiceImpl(TransactionRegistry transactionRegistry,
             TransactionService transactionService,
             PreloadSomeSuperTypesCache preloadSomeSuperTypesCache) {
@@ -68,15 +73,21 @@ public class BytecodeServiceImpl implements BytecodeService {
     }
 
     @Override
-    public void enteringMain(String mainClass, @Nullable String /*@Nullable*/ [] mainArgs) {
-        enteringMainCommon(mainClass, mainArgs, mainClass, "main");
+    public void enteringMainMethod(String mainClass, @Nullable String /*@Nullable*/ [] mainArgs) {
+        enteringMainMethod(mainClass, mainArgs, mainClass, "main");
     }
 
     @Override
-    public void enteringApacheCommonsDaemonLoad(String mainClass,
+    public void enteringApacheCommonsDaemonLoadMethod(String mainClass,
             @Nullable String /*@Nullable*/ [] mainArgs) {
-        enteringMainCommon(mainClass, mainArgs, "org.apache.commons.daemon.support.DaemonLoader",
+        enteringMainMethod(mainClass, mainArgs, "org.apache.commons.daemon.support.DaemonLoader",
                 "load");
+    }
+
+    @Override
+    public void enteringPossibleProcrunStartMethod(String className, String methodName,
+            @Nullable String /*@Nullable*/ [] methodArgs) {
+        enteringMainMethod(className, methodArgs, className, methodName);
     }
 
     @Override
@@ -152,24 +163,61 @@ public class BytecodeServiceImpl implements BytecodeService {
         if (className == null) {
             return;
         }
-        for (String superClassName : preloadSomeSuperTypesCache.get(className)) {
-            logger.debug("pre-loading super class {} for {}, in loader={}@{}", superClassName,
-                    className, loader.getClass().getName(), loader.hashCode());
-            try {
-                Class.forName(superClassName, false, loader);
-            } catch (ClassNotFoundException e) {
-                logger.debug("super class {} not found (for sub-class {})", superClassName,
-                        className, e);
-                continue;
+        Set<String> preloadSomeSuperTypes = preloadSomeSuperTypesCache.get(className);
+        if (preloadSomeSuperTypes.isEmpty()) {
+            return;
+        }
+        Set<String> currentlyLoadingTypes = currentlyLoadingTypesHolder.get();
+        boolean topLevel;
+        if (currentlyLoadingTypes == null) {
+            // using linked hash set so that top level class can be found as first element
+            currentlyLoadingTypes = Sets.newLinkedHashSet();
+            currentlyLoadingTypesHolder.set(currentlyLoadingTypes);
+            topLevel = true;
+        } else if (currentlyLoadingTypes.iterator().next().equals(className)) {
+            // not top level, and need to abort the (nested) defineClass() that this is inside of,
+            // otherwise the defineClass() that this is inside of will succeed, but then the top
+            // level defineClass() will fail with "attempted duplicate class definition for name"
+            throw new AbortPreload();
+        } else {
+            topLevel = false;
+        }
+        if (!currentlyLoadingTypes.add(className)) {
+            // already loading className, prevent infinite loop / StackOverflowError, see
+            // AnalyzedClassPlanBeeWithBadPreloadCacheIT
+            return;
+        }
+        try {
+            for (String superClassName : preloadSomeSuperTypes) {
+                logger.debug("pre-loading super class {} for {}, in loader={}@{}", superClassName,
+                        className, loader.getClass().getName(), loader.hashCode());
+                try {
+                    Class.forName(superClassName, false, loader);
+                } catch (ClassNotFoundException e) {
+                    logger.debug("super class {} not found (for sub-class {})", superClassName,
+                            className, e);
+                } catch (LinkageError e) {
+                    // this can happen, e.g. ClassCircularityError, under strange circumstances,
+                    // see AnalyzedClassPlanBeeWithMoreBadPreloadCacheIT
+                    logger.debug("linkage error occurred while loading super class {} (for"
+                            + " sub-class {})", superClassName, className, e);
+                } catch (AbortPreload e) {
+                }
+            }
+        } finally {
+            if (topLevel) {
+                currentlyLoadingTypesHolder.remove();
+            } else {
+                currentlyLoadingTypes.remove(className);
             }
         }
     }
 
-    public void enteringMainCommon(String mainClass, @Nullable String /*@Nullable*/ [] mainArgs,
-            String expectedTopLevelClass, String expectedTopLevelMethodName) {
+    public void enteringMainMethod(String className, @Nullable String /*@Nullable*/ [] methodArgs,
+            String expectedTopLevelClassName, String expectedTopLevelMethodName) {
         if (onEnteringMain == null) {
             if (DEBUG_MAIN_CLASS) {
-                logger.info("entering {}.main(), but callback not set yet", mainClass,
+                logger.info("entering {}.main(), but callback not set yet", className,
                         new Exception("location stack trace"));
             }
             return;
@@ -179,13 +227,13 @@ public class BytecodeServiceImpl implements BytecodeService {
             return;
         }
         StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
-        if (ignoreMainClass(expectedTopLevelClass, expectedTopLevelMethodName, stackTrace)) {
+        if (ignoreMainClass(expectedTopLevelClassName, expectedTopLevelMethodName, stackTrace)) {
             if (DEBUG_MAIN_CLASS) {
-                logger.info("ignoring {}.main()", mainClass, new Exception("location stack trace"));
+                logger.info("ignoring {}.main()", className, new Exception("location stack trace"));
             }
             return;
         }
-        if (mainClass.equals("com.ibm.java.diagnostics.healthcenter.agent.mbean.HCLaunchMBean")) {
+        if (className.equals("com.ibm.java.diagnostics.healthcenter.agent.mbean.HCLaunchMBean")) {
             // IBM J9 VM -Xhealthcenter
             return;
         }
@@ -194,14 +242,14 @@ public class BytecodeServiceImpl implements BytecodeService {
             return;
         }
         String unwrappedMainClass;
-        if (mainClass.startsWith("org.tanukisoftware.wrapper.")
-                && mainArgs != null && mainArgs.length > 0) {
-            unwrappedMainClass = mainArgs[0];
+        if (className.startsWith("org.tanukisoftware.wrapper.")
+                && methodArgs != null && methodArgs.length > 0) {
+            unwrappedMainClass = methodArgs[0];
         } else {
-            unwrappedMainClass = mainClass;
+            unwrappedMainClass = className;
         }
         if (DEBUG_MAIN_CLASS) {
-            logger.info("entering {}.main()", mainClass, new Exception("location stack trace"));
+            logger.info("entering {}.main()", className, new Exception("location stack trace"));
         }
         try {
             onEnteringMain.run(unwrappedMainClass);
@@ -223,4 +271,7 @@ public class BytecodeServiceImpl implements BytecodeService {
     public interface OnEnteringMain {
         void run(@Nullable String mainClass) throws Exception;
     }
+
+    @SuppressWarnings("serial")
+    private static class AbortPreload extends RuntimeException {}
 }

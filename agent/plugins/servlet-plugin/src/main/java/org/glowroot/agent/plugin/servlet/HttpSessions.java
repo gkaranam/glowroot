@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2018 the original author or authors.
+ * Copyright 2012-2019 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,17 +21,22 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.servlet.http.HttpSession;
+
+import org.glowroot.agent.plugin.api.Logger;
 import org.glowroot.agent.plugin.api.checker.Nullable;
 import org.glowroot.agent.plugin.api.util.Beans;
 import org.glowroot.agent.plugin.api.util.ImmutableMap;
-import org.glowroot.agent.plugin.servlet.ServletAspect.HttpSession;
-import org.glowroot.agent.plugin.servlet.ServletPluginProperties.SessionAttributePath;
+import org.glowroot.agent.plugin.servlet._.ServletMessageSupplier;
+import org.glowroot.agent.plugin.servlet._.ServletPluginProperties;
+import org.glowroot.agent.plugin.servlet._.ServletPluginProperties.SessionAttributePath;
+import org.glowroot.agent.plugin.servlet._.Strings;
 
-class HttpSessions {
+public class HttpSessions {
 
     private HttpSessions() {}
 
-    static Map<String, String> getSessionAttributes(HttpSession session) {
+    public static Map<String, String> getSessionAttributes(HttpSession session) {
         List<SessionAttributePath> attributePaths =
                 ServletPluginProperties.captureSessionAttributePaths();
         if (attributePaths.isEmpty()) {
@@ -51,7 +56,7 @@ class HttpSessions {
         return ImmutableMap.copyOf(captureMap);
     }
 
-    static @Nullable Object getSessionAttribute(HttpSession session,
+    public static @Nullable Object getSessionAttribute(HttpSession session,
             SessionAttributePath attributePath) {
         if (attributePath.isSessionId()) {
             return session.getId();
@@ -60,7 +65,7 @@ class HttpSessions {
         return getSessionAttribute(attributeValue, attributePath);
     }
 
-    static @Nullable Object getSessionAttribute(@Nullable Object attributeValue,
+    public static @Nullable Object getSessionAttribute(@Nullable Object attributeValue,
             SessionAttributePath attributePath) {
         List<String> nestedPath = attributePath.getNestedPath();
         if (nestedPath.isEmpty()) {
@@ -69,7 +74,7 @@ class HttpSessions {
             try {
                 return Beans.value(attributeValue, nestedPath);
             } catch (Exception e) {
-                return "<could not access: " + e + ">";
+                return "<error evaluating: " + e + ">";
             }
         }
     }
@@ -89,13 +94,19 @@ class HttpSessions {
                 captureMap.put(attributeName, Strings.nullToEmpty(session.getId()));
                 continue;
             }
-            Object value = session.getAttribute(attributeName);
-            if (value == null) {
+            Object valueObj = session.getAttribute(attributeName);
+            if (valueObj == null) {
                 // value shouldn't be null, but its (remotely) possible that a concurrent
                 // request for the same session just removed the attribute
                 continue;
             }
-            captureMap.put(attributeName, Strings.nullToEmpty(value.toString()));
+            String value;
+            try {
+                value = Strings.nullToEmpty(valueObj.toString());
+            } catch (Exception f) {
+                value = "<error evaluating: " + f + ">";
+            }
+            captureMap.put(attributeName, value);
         }
     }
 

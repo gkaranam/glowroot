@@ -191,7 +191,7 @@ HandlebarsRendering = (function () {
         flattenedTimer = {
           name: timer.name,
           totalNanos: timer.totalNanos,
-          count: timer.count,
+          count: timer.extended ? 0 : timer.count,
           active: timer.active,
           id: nextId++
         };
@@ -202,7 +202,9 @@ HandlebarsRendering = (function () {
         // (this is possible when they are separated by another timer)
         flattenedTimer.totalNanos += timer.totalNanos;
         flattenedTimer.active = flattenedTimer.active || timer.active;
-        flattenedTimer.count += timer.count;
+        if (!timer.extended) {
+          flattenedTimer.count += timer.count;
+        }
       }
       if (timer.childTimers) {
         $.each(timer.childTimers, function (index, nestedTimer) {
@@ -283,6 +285,10 @@ HandlebarsRendering = (function () {
 
   Handlebars.registerHelper('formatMillis', function (value) {
     return formatMillis(value);
+  });
+
+  Handlebars.registerHelper('formatNanos', function (value) {
+    return formatNanos(value);
   });
 
   Handlebars.registerHelper('formatInteger', function (value) {
@@ -1024,7 +1030,7 @@ HandlebarsRendering = (function () {
     var commentRegex = /[/][*](.|\n)*?[*][/]/g;
 
     function numNonWhitespaceChars(str) {
-      return str.replace(/\s+/, '').length;
+      return str.replace(/\s+/g, '').length;
     }
 
     var numNonWhitespaceCharsBeforeComment = [];
@@ -1036,6 +1042,7 @@ HandlebarsRendering = (function () {
       matchTo = commentRegex.lastIndex;
       numNonWhitespaceCharsBeforeComment.push(numNonWhitespaceChars(queryText.substring(lastMatchTo, matchFrom)));
       comments.push(queryText.substring(matchFrom, matchTo));
+      lastMatchTo = matchTo;
     }
 
     var formatted = SqlPrettyPrinter.format(queryText);
@@ -1060,14 +1067,24 @@ HandlebarsRendering = (function () {
     while (true) {
       if (nonWhitespaceCharCount === nextCommentAtNonWhitespaceCharCount) {
         if (nonWhitespaceCharCount === 0) {
-          formatted = formatted.substring(0, i) + initialSpaces + comments[currCommentIndex++] + '\n'
+          formatted = formatted.substring(0, i) + initialSpaces + comments[currCommentIndex] + '\n'
               + formatted.substring(i);
+          i += initialSpaces.length + comments[currCommentIndex].length + 1;
+          currCommentIndex++;
         } else {
-          formatted = formatted.substring(0, i) + ' ' + comments[currCommentIndex++] + formatted.substring(i);
+          // trim is to absorb whitespace that was meant for alignment which is now destroyed by the comment anyways
+          formatted = formatted.substring(0, i) + comments[currCommentIndex] + formatted.substring(i).trim();
+          i += comments[currCommentIndex].length;
+          currCommentIndex++;
         }
-        nextCommentAtNonWhitespaceCharCount = numNonWhitespaceCharsBeforeComment[currCommentIndex];
+        nextCommentAtNonWhitespaceCharCount =
+            nonWhitespaceCharCount + numNonWhitespaceCharsBeforeComment[currCommentIndex];
       }
       if (currCommentIndex === comments.length) {
+        break;
+      }
+      if (i > formatted.length) {
+        console.log('unable to match up all comments all');
         break;
       }
       if (!/\s/.test(formatted[i++])) {
@@ -1621,6 +1638,30 @@ HandlebarsRendering = (function () {
     }
   }
 
+  function formatNanos(nanos) {
+    var millis = nanos ? Math.floor(nanos / 1000000) : 0;
+    var hours;
+    var minutes;
+    var seconds;
+    // more than 1 hour
+    if (millis > 3600000) {
+      hours = Math.floor(millis / 3600000);
+      minutes = (millis - hours * 3600000) / 60000;
+      return formatWithExactlyZeroFractionalDigit(hours) + ' '
+          + (hours > 1 ? 'hours' : 'hour') + ' '
+          + formatWithExactlyOneFractionalDigit(minutes) + ' minutes';
+    }
+    // more than 1 minute
+    if (millis > 60000) {
+      minutes = Math.floor(millis / 60000);
+      seconds = (millis - minutes * 60000) / 1000;
+      return formatWithExactlyZeroFractionalDigit(minutes) + ' '
+          + (minutes > 1 ? 'minutes' : 'minute') + ' '
+          + formatWithExactlyOneFractionalDigit(seconds) + ' seconds';
+    }
+    return formatMillis(millis) + ' milliseconds';
+  }
+
   function formatMillis(millis) {
     if (Math.abs(millis) < 0.0000005) {
       // less than 0.5 nanoseconds
@@ -1670,6 +1711,10 @@ HandlebarsRendering = (function () {
 
   function formatWithExactlyOneFractionalDigit(value) {
     return (Math.round(value * 10) / 10).toLocaleString(undefined, {minimumFractionDigits: 1});
+  }
+
+  function formatWithExactlyZeroFractionalDigit(value) {
+    return Math.round(value).toLocaleString(undefined);
   }
 
   function registerShowMoreHandler(breakdown) {

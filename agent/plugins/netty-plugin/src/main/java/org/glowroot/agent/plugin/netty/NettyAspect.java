@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2018 the original author or authors.
+ * Copyright 2016-2019 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,13 @@
  */
 package org.glowroot.agent.plugin.netty;
 
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.GenericFutureListener;
+
 import org.glowroot.agent.plugin.api.Agent;
 import org.glowroot.agent.plugin.api.AuxThreadContext;
-import org.glowroot.agent.plugin.api.MessageSupplier;
 import org.glowroot.agent.plugin.api.OptionalThreadContext;
 import org.glowroot.agent.plugin.api.ThreadContext;
 import org.glowroot.agent.plugin.api.TimerName;
@@ -34,6 +38,7 @@ import org.glowroot.agent.plugin.api.weaving.OnReturn;
 import org.glowroot.agent.plugin.api.weaving.OnThrow;
 import org.glowroot.agent.plugin.api.weaving.Pointcut;
 import org.glowroot.agent.plugin.api.weaving.Shim;
+import org.glowroot.agent.plugin.netty._.Util;
 
 public class NettyAspect {
 
@@ -80,32 +85,30 @@ public class NettyAspect {
         void glowroot$setAuxContext(@Nullable AuxThreadContext auxThreadContext);
     }
 
-    @Shim("io.netty.channel.ChannelHandlerContext")
-    public interface ChannelHandlerContext {
-
-        @Shim("io.netty.channel.Channel channel()")
-        @Nullable
-        ChannelMixin glowroot$channel();
-    }
-
+    // need shims for netty-http-codec classes, since the pointcuts below are applied to
+    // netty-transport classes, whether or not netty-codec-http is included on the classpath
     @Shim("io.netty.handler.codec.http.HttpRequest")
-    public interface HttpRequest {
+    public interface HttpRequestShim {
 
         @Shim("io.netty.handler.codec.http.HttpMethod getMethod()")
-        HttpMethod glowroot$getMethod();
+        HttpMethodShim glowroot$getMethod();
 
         @Nullable
         String getUri();
     }
 
+    // need shims for netty-http-codec classes, since the pointcuts below are applied to
+    // netty-transport classes, whether or not netty-codec-http is included on the classpath
     @Shim("io.netty.handler.codec.http.HttpMethod")
-    public interface HttpMethod {
+    public interface HttpMethodShim {
         @Nullable
         String name();
     }
 
+    // need shims for netty-http-codec classes, since the pointcuts below are applied to
+    // netty-transport classes, whether or not netty-codec-http is included on the classpath
     @Shim("io.netty.handler.codec.http.LastHttpContent")
-    public interface LastHttpContent {}
+    public interface LastHttpContentShim {}
 
     @Pointcut(className = "io.netty.channel.ChannelHandlerContext", methodName = "fireChannelRead",
             methodParameterTypes = {"java.lang.Object"}, nestingGroup = "netty-inbound",
@@ -115,28 +118,38 @@ public class NettyAspect {
         private static final TimerName timerName = Agent.getTimerName(InboundAdvice.class);
 
         @OnBefore
-        public static @Nullable TraceEntry onBefore(OptionalThreadContext context,
+        public static @Nullable TraceEntry onBefore(final OptionalThreadContext context,
                 @BindReceiver ChannelHandlerContext channelHandlerContext,
                 @BindParameter @Nullable Object msg) {
-            ChannelMixin channel = channelHandlerContext.glowroot$channel();
+            Channel channel = channelHandlerContext.channel();
             if (channel == null) {
                 return null;
             }
-            AuxThreadContext auxContext = channel.glowroot$getAuxContext();
+            final ChannelMixin channelMixin = (ChannelMixin) channel;
+            AuxThreadContext auxContext = channelMixin.glowroot$getAuxContext();
             if (auxContext != null) {
                 return auxContext.start();
             }
-            if (!(msg instanceof HttpRequest)) {
+            if (!(msg instanceof HttpRequestShim)) {
                 return null;
             }
-            HttpRequest request = (HttpRequest) msg;
-            HttpMethod method = request.glowroot$getMethod();
+            HttpRequestShim request = (HttpRequestShim) msg;
+            HttpMethodShim method = request.glowroot$getMethod();
             String methodName = method == null ? null : method.name();
             TraceEntry traceEntry =
-                    startAsyncTransaction(context, methodName, request.getUri(), timerName);
-            channel.glowroot$setThreadContextToComplete(context);
-            if (!(msg instanceof LastHttpContent)) {
-                channel.glowroot$setAuxContext(context.createAuxThreadContext());
+                    Util.startAsyncTransaction(context, methodName, request.getUri(), timerName);
+            channelMixin.glowroot$setThreadContextToComplete(context);
+            // IMPORTANT the close future gets called if client disconnects, but does not get called
+            // when transaction ends and Keep-Alive is used (so still need to capture write
+            // LastHttpContent below)
+            channel.closeFuture().addListener(new GenericFutureListener<Future<? super Void>>() {
+                @Override
+                public void operationComplete(Future<? super Void> future) {
+                    endTransaction(channelMixin);
+                }
+            });
+            if (!(msg instanceof LastHttpContentShim)) {
+                channelMixin.glowroot$setAuxContext(context.createAuxThreadContext());
             }
             return traceEntry;
         }
@@ -159,13 +172,13 @@ public class NettyAspect {
 
     @Pointcut(className = "io.netty.channel.ChannelHandlerContext",
             methodName = "fireChannelReadComplete", methodParameterTypes = {},
-            nestingGroup = "netty-inbound", timerName = "http request")
+            nestingGroup = "netty-inbound")
     public static class InboundCompleteAdvice {
 
         @OnBefore
         public static @Nullable TraceEntry onBefore(
                 @BindReceiver ChannelHandlerContext channelHandlerContext) {
-            ChannelMixin channel = channelHandlerContext.glowroot$channel();
+            ChannelMixin channel = (ChannelMixin) channelHandlerContext.channel();
             if (channel == null) {
                 return null;
             }
@@ -192,6 +205,9 @@ public class NettyAspect {
         }
     }
 
+    // IMPORTANT the close future gets called if client disconnects, but does not get called when
+    // transaction ends and Keep-Alive is used (so still need to capture write LastHttpContent
+    // below)
     @Pointcut(className = "io.netty.channel.ChannelOutboundHandler", methodName = "write",
             methodParameterTypes = {"io.netty.channel.ChannelHandlerContext",
                     "java.lang.Object", "io.netty.channel.ChannelPromise"})
@@ -201,65 +217,26 @@ public class NettyAspect {
         public static void onAfter(
                 @BindParameter @Nullable ChannelHandlerContext channelHandlerContext,
                 @BindParameter @Nullable Object msg) {
-            if (!(msg instanceof LastHttpContent)) {
+            if (!(msg instanceof LastHttpContentShim)) {
                 return;
             }
             if (channelHandlerContext == null) {
                 return;
             }
-            ChannelMixin channel = channelHandlerContext.glowroot$channel();
+            Channel channel = channelHandlerContext.channel();
             if (channel == null) {
                 return;
             }
-            ThreadContext context = channel.glowroot$getThreadContextToComplete();
-            if (context != null) {
-                context.setTransactionAsyncComplete();
-                channel.glowroot$setThreadContextToComplete(null);
-                channel.glowroot$setAuxContext(null);
-            }
+            endTransaction((ChannelMixin) channel);
         }
     }
 
-    // ChannelOutboundInvoker is interface of ChannelHandlerContext in early 4.x versions and
-    // close() is defined on ChannelOutboundInvoker in those versions
-    @Pointcut(className = "io.netty.channel.ChannelHandlerContext"
-            + "|io.netty.channel.ChannelOutboundInvoker", methodName = "close",
-            methodParameterTypes = {})
-    public static class CloseAdvice {
-
-        @OnBefore
-        public static void onBefore(ThreadContext context) {
+    private static void endTransaction(ChannelMixin channelMixin) {
+        ThreadContext context = channelMixin.glowroot$getThreadContextToComplete();
+        if (context != null) {
             context.setTransactionAsyncComplete();
+            channelMixin.glowroot$setThreadContextToComplete(null);
+            channelMixin.glowroot$setAuxContext(null);
         }
-    }
-
-    static TraceEntry startAsyncTransaction(OptionalThreadContext context,
-            @Nullable String methodName, @Nullable String uri, TimerName timerName) {
-        String path = getPath(uri);
-        String message;
-        if (methodName == null) {
-            message = uri;
-        } else {
-            message = methodName + " " + uri;
-        }
-        TraceEntry traceEntry =
-                context.startTransaction("Web", path, MessageSupplier.create(message), timerName);
-        context.setTransactionAsync();
-        return traceEntry;
-    }
-
-    private static String getPath(@Nullable String uri) {
-        String path;
-        if (uri == null) {
-            path = "";
-        } else {
-            int index = uri.indexOf('?');
-            if (index == -1) {
-                path = uri;
-            } else {
-                path = uri.substring(0, index);
-            }
-        }
-        return path;
     }
 }

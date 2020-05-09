@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 the original author or authors.
+ * Copyright 2014-2019 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,13 +31,6 @@ public class Util {
         return getArrayClass(Array.newInstance(type, 0).getClass(), nDimensions - 1);
     }
 
-    public static String[] appendToJBossModulesSystemPkgs(String[] original) {
-        String[] arr = new String[original.length + 1];
-        System.arraycopy(original, 0, arr, 0, original.length);
-        arr[original.length] = "org.glowroot.agent";
-        return arr;
-    }
-
     public static Set<Type> stripGlowrootTypes(Set<Type> decoratedTypes) {
         boolean found = false;
         for (Type decoratedType : decoratedTypes) {
@@ -59,33 +52,8 @@ public class Util {
         return stripped;
     }
 
-    public static Set<Class<?>> stripGlowrootClasses(Set<Class<?>> classes) {
-        boolean found = false;
-        for (Class<?> clazz : classes) {
-            if (isGlowrootClass(clazz)) {
-                found = true;
-            }
-        }
-        if (!found) {
-            // optimization of common case
-            return classes;
-        }
-        // linked hash set to preserve ordering
-        Set<Class<?>> stripped = new LinkedHashSet<Class<?>>();
-        for (Class<?> clazz : classes) {
-            if (!isGlowrootClass(clazz)) {
-                stripped.add(clazz);
-            }
-        }
-        return stripped;
-    }
-
     private static boolean isGlowrootType(Type decoratedType) {
         return decoratedType instanceof Class
                 && ((Class<?>) decoratedType).getName().startsWith("org.glowroot.agent.");
-    }
-
-    private static boolean isGlowrootClass(Class<?> clazz) {
-        return clazz.getName().startsWith("org.glowroot.agent.");
     }
 }

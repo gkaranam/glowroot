@@ -3,9 +3,8 @@ sudo: required
 language: java
 services:
   - docker
+  - xvfb
 before_install:
-  - "export DISPLAY=:99.0"
-  - sh -e /etc/init.d/xvfb start
     # NewRatio is to leave as much memory as possible to old gen
   - echo "MAVEN_OPTS=\"-Xmx768m -XX:NewRatio=20\"" > ~/.mavenrc
 install: true
@@ -58,10 +57,6 @@ matrix:
       env: TARGET=test3 TEST_SHADED=true GLOWROOT_HARNESS=javaagent
     - jdk: openjdk9
       env: TARGET=test4 TEST_SHADED=true GLOWROOT_HARNESS=javaagent
-    - jdk: openjdk7
-      env: TARGET=test1 TEST_SHADED=true GLOWROOT_HARNESS=javaagent
-    - jdk: openjdk7
-      env: TARGET=test2 TEST_SHADED=true GLOWROOT_HARNESS=javaagent
     - jdk: openjdk8
       env: TARGET=test1 TEST_SHADED=false GLOWROOT_HARNESS=javaagent
     - jdk: openjdk8

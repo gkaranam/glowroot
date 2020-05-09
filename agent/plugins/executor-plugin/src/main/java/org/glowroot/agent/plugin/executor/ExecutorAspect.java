@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2018 the original author or authors.
+ * Copyright 2016-2019 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package org.glowroot.agent.plugin.executor;
 
 import java.util.Collection;
+import java.util.TimerTask;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -23,6 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.glowroot.agent.plugin.api.Agent;
 import org.glowroot.agent.plugin.api.AuxThreadContext;
 import org.glowroot.agent.plugin.api.Logger;
+import org.glowroot.agent.plugin.api.ParameterHolder;
 import org.glowroot.agent.plugin.api.ThreadContext;
 import org.glowroot.agent.plugin.api.Timer;
 import org.glowroot.agent.plugin.api.TimerName;
@@ -45,6 +47,11 @@ public class ExecutorAspect {
 
     private static final Logger logger = Logger.getLogger(ExecutorAspect.class);
 
+    private static final String EXECUTOR_CLASSES = "java.util.concurrent.Executor"
+            + "|java.util.concurrent.ExecutorService"
+            + "|org.springframework.core.task.AsyncTaskExecutor"
+            + "|org.springframework.core.task.AsyncListenableTaskExecutor";
+
     private static final AtomicBoolean isDoneExceptionLogged = new AtomicBoolean();
 
     // the field and method names are verbose since they will be mixed in to existing classes
@@ -66,9 +73,11 @@ public class ExecutorAspect {
         }
     }
 
+    // TODO suppress various known thread pool threads (e.g. TimerThread)
     @Mixin({"org.apache.tomcat.util.net.JIoEndpoint$SocketProcessor",
-            "org.apache.http.impl.nio.client.CloseableHttpAsyncClientBase$1"})
-    public static class SuppressedRunnableEtcImpl implements SuppressedRunnableEtcMixin {}
+            "org.apache.http.impl.nio.client.CloseableHttpAsyncClientBase$1",
+            "java.util.TimerThread"})
+    public static class SuppressedRunnableImpl implements SuppressedRunnableMixin {}
 
     // the method names are verbose since they will be mixed in to existing classes
     public interface RunnableEtcMixin {
@@ -79,26 +88,75 @@ public class ExecutorAspect {
         void glowroot$setAuxContext(@Nullable AuxThreadContext auxContext);
     }
 
-    public interface SuppressedRunnableEtcMixin {}
+    public interface SuppressedRunnableMixin {}
 
-    @Pointcut(
-            className = "java.util.concurrent.Executor|java.util.concurrent.ExecutorService"
-                    + "|java.util.concurrent.ForkJoinPool"
-                    + "|org.springframework.core.task.AsyncTaskExecutor"
-                    + "|org.springframework.core.task.AsyncListenableTaskExecutor"
-                    + "|akka.jsr166y.ForkJoinPool"
-                    + "|scala.concurrent.forkjoin.ForkJoinPool",
-            methodName = "execute|submit|invoke|submitListenable",
-            methodParameterTypes = {".."}, nestingGroup = "executor-execute")
-    public static class ExecuteAdvice {
+    @Pointcut(className = EXECUTOR_CLASSES, methodName = "execute|submit|submitListenable",
+            methodParameterTypes = {"java.lang.Runnable", ".."}, nestingGroup = "executor-execute")
+    public static class ExecuteRunnableAdvice {
+        @OnBefore
+        public static void onBefore(ThreadContext context,
+                @BindParameter ParameterHolder<Runnable> runnableHolder) {
+            onBeforeWithRunnableHolder(context, runnableHolder);
+        }
+    }
+
+    @Pointcut(className = EXECUTOR_CLASSES, methodName = "execute|submit|submitListenable",
+            methodParameterTypes = {"java.util.concurrent.Callable", ".."},
+            nestingGroup = "executor-execute")
+    public static class ExecuteCallableAdvice {
+        @OnBefore
+        public static <T> void onBefore(ThreadContext context,
+                @BindParameter ParameterHolder<Callable<T>> callableHolder) {
+            onBeforeWithCallableHolder(context, callableHolder);
+        }
+    }
+
+    @Pointcut(className = "java.util.concurrent.ForkJoinPool", methodName = "execute|submit|invoke",
+            methodParameterTypes = {"java.util.concurrent.ForkJoinTask", ".."},
+            nestingGroup = "executor-execute")
+    public static class ForkJoinPoolAdvice {
         @IsEnabled
-        public static boolean isEnabled(@BindParameter Object runnableEtc) {
-            return isEnabledCommon(runnableEtc);
+        public static boolean isEnabled(@BindParameter Object forkJoinTask) {
+            // this class may have been loaded before class file transformer was added to jvm
+            return forkJoinTask instanceof RunnableEtcMixin;
         }
         @OnBefore
-        public static void onBefore(ThreadContext context, @BindParameter Object runnableEtc) {
+        public static void onBefore(ThreadContext context, @BindParameter Object forkJoinTask) {
             // cast is safe because of isEnabled() check above
-            onBeforeCommon(context, (RunnableEtcMixin) runnableEtc);
+            onBeforeCommon(context, (RunnableEtcMixin) forkJoinTask);
+        }
+    }
+
+    @Pointcut(className = "akka.jsr166y.ForkJoinPool", methodName = "execute|submit|invoke",
+            methodParameterTypes = {"akka.jsr166y.ForkJoinTask", ".."},
+            nestingGroup = "executor-execute")
+    public static class AkkaJsr166yForkJoinPoolAdvice {
+        @IsEnabled
+        public static boolean isEnabled(@BindParameter Object forkJoinTask) {
+            // this class may have been loaded before class file transformer was added to jvm
+            return forkJoinTask instanceof RunnableEtcMixin;
+        }
+        @OnBefore
+        public static void onBefore(ThreadContext context, @BindParameter Object forkJoinTask) {
+            // cast is safe because of isEnabled() check above
+            onBeforeCommon(context, (RunnableEtcMixin) forkJoinTask);
+        }
+    }
+
+    @Pointcut(className = "scala.concurrent.forkjoin.ForkJoinPool",
+            methodName = "execute|submit|invoke",
+            methodParameterTypes = {"scala.concurrent.forkjoin.ForkJoinTask", ".."},
+            nestingGroup = "executor-execute")
+    public static class ScalaForkJoinPoolAdvice {
+        @IsEnabled
+        public static boolean isEnabled(@BindParameter Object forkJoinTask) {
+            // this class may have been loaded before class file transformer was added to jvm
+            return forkJoinTask instanceof RunnableEtcMixin;
+        }
+        @OnBefore
+        public static void onBefore(ThreadContext context, @BindParameter Object forkJoinTask) {
+            // cast is safe because of isEnabled() check above
+            onBeforeCommon(context, (RunnableEtcMixin) forkJoinTask);
         }
     }
 
@@ -133,10 +191,19 @@ public class ExecutorAspect {
     @Pointcut(className = "java.lang.Thread", methodName = "<init>",
             methodParameterTypes = {"java.lang.Runnable", ".."}, nestingGroup = "executor-execute")
     public static class ThreadInitWithRunnableAdvice {
+        // cannot use @BindReceiver in @OnBefore of a constructor (at least not in OpenJ9, and for
+        // good reason since receiver is not initialized before call to super)
+        @OnBefore
+        public static boolean onBefore(ThreadContext context,
+                @BindParameter ParameterHolder<Runnable> runnableHolder) {
+            return onThreadInitCommon(context, runnableHolder);
+        }
         @OnReturn
-        public static void onReturn(ThreadContext context, @BindReceiver Thread thread,
-                @BindParameter @Nullable Runnable runnable) {
-            onThreadInitCommon(context, thread, runnable);
+        public static void onReturn(ThreadContext context, @BindTraveler boolean alreadyHandled,
+                @BindReceiver Thread thread) {
+            if (!alreadyHandled && thread instanceof RunnableEtcMixin) {
+                onBeforeCommon(context, (RunnableEtcMixin) thread);
+            }
         }
     }
 
@@ -144,11 +211,20 @@ public class ExecutorAspect {
             methodParameterTypes = {"java.lang.ThreadGroup", "java.lang.Runnable", ".."},
             nestingGroup = "executor-execute")
     public static class ThreadInitWithThreadGroupAdvice {
-        @OnReturn
-        public static void onReturn(ThreadContext context, @BindReceiver Thread thread,
+        // cannot use @BindReceiver in @OnBefore of a constructor (at least not in OpenJ9, and for
+        // good reason since receiver is not initialized before call to super)
+        @OnBefore
+        public static boolean onBefore(ThreadContext context,
                 @SuppressWarnings("unused") @BindParameter ThreadGroup threadGroup,
-                @BindParameter @Nullable Runnable runnable) {
-            onThreadInitCommon(context, thread, runnable);
+                @BindParameter ParameterHolder<Runnable> runnableHolder) {
+            return onThreadInitCommon(context, runnableHolder);
+        }
+        @OnReturn
+        public static void onReturn(ThreadContext context, @BindTraveler boolean alreadyHandled,
+                @BindReceiver Thread thread) {
+            if (!alreadyHandled && thread instanceof RunnableEtcMixin) {
+                onBeforeCommon(context, (RunnableEtcMixin) thread);
+            }
         }
     }
 
@@ -157,14 +233,10 @@ public class ExecutorAspect {
             methodParameterTypes = {"java.lang.Runnable", "java.util.concurrent.Executor"},
             nestingGroup = "executor-add-listener")
     public static class AddListenerAdvice {
-        @IsEnabled
-        public static boolean isEnabled(@BindParameter Runnable runnable) {
-            return isEnabledCommon(runnable);
-        }
         @OnBefore
-        public static void onBefore(ThreadContext context, @BindParameter Runnable runnable) {
-            // cast is safe because of isEnabled() check above
-            onBeforeCommon(context, (RunnableEtcMixin) runnable);
+        public static void onBefore(ThreadContext context,
+                @BindParameter ParameterHolder<Runnable> runnableHolder) {
+            onBeforeWithRunnableHolder(context, runnableHolder);
         }
     }
 
@@ -182,8 +254,7 @@ public class ExecutorAspect {
             }
             for (Object callable : callables) {
                 // this class may have been loaded before class file transformer was added to jvm
-                if (callable instanceof RunnableEtcMixin
-                        && !(callable instanceof SuppressedRunnableEtcMixin)) {
+                if (callable instanceof RunnableEtcMixin) {
                     RunnableEtcMixin callableMixin = (RunnableEtcMixin) callable;
                     AuxThreadContext auxContext = context.createAuxThreadContext();
                     callableMixin.glowroot$setAuxContext(auxContext);
@@ -193,19 +264,23 @@ public class ExecutorAspect {
     }
 
     @Pointcut(className = "java.util.concurrent.ScheduledExecutorService", methodName = "schedule",
-            methodParameterTypes = {".."}, nestingGroup = "executor-execute")
-    public static class ScheduleAdvice {
-        @IsEnabled
-        public static boolean isEnabled(@BindParameter Object runnableEtc) {
-            // this class may have been loaded before class file transformer was added to jvm
-            return runnableEtc instanceof RunnableEtcMixin
-                    && !(runnableEtc instanceof SuppressedRunnableEtcMixin);
-        }
+            methodParameterTypes = {"java.lang.Runnable", ".."}, nestingGroup = "executor-execute")
+    public static class ScheduleRunnableAdvice {
         @OnBefore
-        public static void onBefore(ThreadContext context, @BindParameter Object runnableEtc) {
-            RunnableEtcMixin runnableEtcMixin = (RunnableEtcMixin) runnableEtc;
-            AuxThreadContext auxContext = context.createAuxThreadContext();
-            runnableEtcMixin.glowroot$setAuxContext(auxContext);
+        public static void onBefore(ThreadContext context,
+                @BindParameter ParameterHolder<Runnable> runnableHolder) {
+            onBeforeWithRunnableHolder(context, runnableHolder);
+        }
+    }
+
+    @Pointcut(className = "java.util.concurrent.ScheduledExecutorService", methodName = "schedule",
+            methodParameterTypes = {"java.util.concurrent.Callable", ".."},
+            nestingGroup = "executor-execute")
+    public static class ScheduleCallableAdvice {
+        @OnBefore
+        public static <T> void onBefore(ThreadContext context,
+                @BindParameter ParameterHolder<Callable<T>> callableHolder) {
+            onBeforeWithCallableHolder(context, callableHolder);
         }
     }
 
@@ -214,20 +289,11 @@ public class ExecutorAspect {
                     "java.lang.Runnable", ".."},
             nestingGroup = "executor-execute")
     public static class ScheduleOnceAdvice {
-        @IsEnabled
-        public static boolean isEnabled(@SuppressWarnings("unused") @BindParameter Object duration,
-                @BindParameter Object runnableEtc) {
-            // this class may have been loaded before class file transformer was added to jvm
-            return runnableEtc instanceof RunnableEtcMixin
-                    && !(runnableEtc instanceof SuppressedRunnableEtcMixin);
-        }
         @OnBefore
         public static void onBefore(ThreadContext context,
                 @SuppressWarnings("unused") @BindParameter Object duration,
-                @BindParameter Object runnableEtc) {
-            RunnableEtcMixin runnableEtcMixin = (RunnableEtcMixin) runnableEtc;
-            AuxThreadContext auxContext = context.createAuxThreadContext();
-            runnableEtcMixin.glowroot$setAuxContext(auxContext);
+                @BindParameter ParameterHolder<Runnable> runnableHolder) {
+            onBeforeWithRunnableHolder(context, runnableHolder);
         }
     }
 
@@ -237,14 +303,12 @@ public class ExecutorAspect {
         @IsEnabled
         public static boolean isEnabled(@BindParameter Object runnableEtc) {
             // this class may have been loaded before class file transformer was added to jvm
-            return runnableEtc instanceof RunnableEtcMixin
-                    && !(runnableEtc instanceof SuppressedRunnableEtcMixin);
+            return runnableEtc instanceof RunnableEtcMixin;
         }
         @OnBefore
-        public static void onBefore(ThreadContext context, @BindParameter Object runnableEtc) {
-            RunnableEtcMixin runnableEtcMixin = (RunnableEtcMixin) runnableEtc;
-            AuxThreadContext auxContext = context.createAuxThreadContext();
-            runnableEtcMixin.glowroot$setAuxContext(auxContext);
+        public static void onBefore(ThreadContext context, @BindParameter TimerTask timerTask) {
+            // cast is safe because of isEnabled() check above
+            onBeforeCommon(context, (RunnableEtcMixin) timerTask);
         }
     }
 
@@ -266,16 +330,10 @@ public class ExecutorAspect {
     @Pointcut(className = "javax.servlet.AsyncContext", methodName = "start",
             methodParameterTypes = {"java.lang.Runnable"})
     public static class StartAdvice {
-        @IsEnabled
-        public static boolean isEnabled(@BindParameter Runnable runnable) {
-            // this class may have been loaded before class file transformer was added to jvm
-            return runnable instanceof RunnableEtcMixin;
-        }
         @OnBefore
-        public static void onBefore(ThreadContext context, @BindParameter Object runnable) {
-            RunnableEtcMixin runnableMixin = (RunnableEtcMixin) runnable;
-            AuxThreadContext auxContext = context.createAuxThreadContext();
-            runnableMixin.glowroot$setAuxContext(auxContext);
+        public static void onBefore(ThreadContext context,
+                @BindParameter ParameterHolder<Runnable> runnableHolder) {
+            onBeforeWithRunnableHolder(context, runnableHolder);
         }
     }
 
@@ -395,6 +453,18 @@ public class ExecutorAspect {
         }
     }
 
+    // need to clear out the "executor-execute" nesting group, see
+    // ExecutorWithLambdasIT.shouldCaptureNestedExecute()
+    @Pointcut(className = "org.glowroot.agent.plugin.executor.RunnableWrapper",
+            methodName = "run", methodParameterTypes = {}, nestingGroup = "executor-run")
+    public static class RunnableWrapperAdvice {}
+
+    // need to clear out the "executor-execute" nesting group, see
+    // ExecutorWithLambdasIT.shouldCaptureNestedSubmit()
+    @Pointcut(className = "org.glowroot.agent.plugin.executor.CallableWrapper",
+            methodName = "call", methodParameterTypes = {}, nestingGroup = "executor-run")
+    public static class CallableWrapperAdvice {}
+
     // the nesting group only starts applying once auxiliary thread context is started (it does not
     // apply to OptionalThreadContext that miss)
     @Pointcut(className = "java.util.concurrent.ForkJoinTask|akka.jsr166y.ForkJoinTask"
@@ -435,11 +505,47 @@ public class ExecutorAspect {
             }
         }
     }
+    private static void onBeforeWithRunnableHolder(ThreadContext context,
+            ParameterHolder<Runnable> runnableHolder) {
+        Runnable runnable = runnableHolder.get();
+        if (runnable instanceof SuppressedRunnableMixin) {
+            return;
+        } else if (runnable instanceof RunnableEtcMixin) {
+            onBeforeCommon(context, (RunnableEtcMixin) runnable);
+        } else if (runnable != null && runnable.getClass().getName().contains("$$Lambda$")) {
+            wrapRunnable(runnableHolder, context);
+        }
+    }
 
-    private static boolean isEnabledCommon(Object runnableEtc) {
-        // this class may have been loaded before class file transformer was added to jvm
-        return runnableEtc instanceof RunnableEtcMixin
-                && !(runnableEtc instanceof SuppressedRunnableEtcMixin);
+    private static <T> void onBeforeWithCallableHolder(ThreadContext context,
+            ParameterHolder<Callable<T>> callableHolder) {
+        Callable<T> callable = callableHolder.get();
+        if (callable instanceof RunnableEtcMixin) {
+            onBeforeCommon(context, (RunnableEtcMixin) callable);
+        } else if (callable != null && callable.getClass().getName().contains("$$Lambda$")) {
+            wrapCallable(callableHolder, context);
+        }
+    }
+
+    private static void onThreadInitCommon(ThreadContext context, Thread thread) {
+        if (thread instanceof RunnableEtcMixin && !(thread instanceof SuppressedRunnableMixin)) {
+            onBeforeCommon(context, (RunnableEtcMixin) thread);
+        }
+    }
+
+    private static boolean onThreadInitCommon(ThreadContext context,
+            ParameterHolder<Runnable> runnableHolder) {
+        Runnable runnable = runnableHolder.get();
+        if (!(runnable instanceof SuppressedRunnableMixin)) {
+            if (runnable instanceof RunnableEtcMixin) {
+                onBeforeCommon(context, (RunnableEtcMixin) runnable);
+                return true;
+            } else if (runnable != null && runnable.getClass().getName().contains("$$Lambda$")) {
+                wrapRunnable(runnableHolder, context);
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void onBeforeCommon(ThreadContext context, RunnableEtcMixin runnableEtc) {
@@ -448,20 +554,19 @@ public class ExecutorAspect {
         runnableMixin.glowroot$setAuxContext(auxContext);
     }
 
-    private static void onThreadInitCommon(ThreadContext context, Thread thread) {
-        if (thread instanceof RunnableEtcMixin && !(thread instanceof SuppressedRunnableEtcMixin)) {
-            onBeforeCommon(context, (RunnableEtcMixin) thread);
+    private static void wrapRunnable(ParameterHolder<Runnable> runnableHolder,
+            ThreadContext context) {
+        Runnable runnable = runnableHolder.get();
+        if (runnable != null) {
+            runnableHolder.set(new RunnableWrapper(runnable, context.createAuxThreadContext()));
         }
     }
 
-    private static void onThreadInitCommon(ThreadContext context, Thread thread,
-            @Nullable Runnable runnable) {
-        if (runnable instanceof RunnableEtcMixin
-                && !(runnable instanceof SuppressedRunnableEtcMixin)) {
-            onBeforeCommon(context, (RunnableEtcMixin) runnable);
-        } else if (thread instanceof RunnableEtcMixin
-                && !(thread instanceof SuppressedRunnableEtcMixin)) {
-            onBeforeCommon(context, (RunnableEtcMixin) thread);
+    private static <T> void wrapCallable(ParameterHolder<Callable<T>> callableHolder,
+            ThreadContext context) {
+        Callable<T> callable = callableHolder.get();
+        if (callable != null) {
+            callableHolder.set(new CallableWrapper<T>(callable, context.createAuxThreadContext()));
         }
     }
 
